@@ -177,6 +177,18 @@ public class GeodatabaseReference {
     return null;
   }
 
+  public synchronized VectorOfWString getDomains() {
+    final Geodatabase geodatabase = getValue();
+    if (geodatabase != null) {
+      try {
+        return geodatabase.getDomains();
+      } finally {
+        disconnect();
+      }
+    }
+    return null;
+  }
+
   public synchronized String getTableDefinition(final String path) {
     final Geodatabase geodatabase = getValue();
     if (geodatabase != null) {
@@ -206,7 +218,12 @@ public class GeodatabaseReference {
         }
       }
       if (this.geodatabase == null) {
-        this.referenceCount = 0;
+        // Undo this call's own increment only. Resetting the counter to zero
+        // would discard the
+        // references held by every other caller, so the next disconnect() would
+        // close the
+        // geodatabase while they were still using it.
+        this.referenceCount--;
       }
       return this.geodatabase;
     }
@@ -241,6 +258,15 @@ public class GeodatabaseReference {
 
   public boolean isClosed() {
     return this.referenceCount == Integer.MIN_VALUE;
+  }
+
+  /**
+   * True if the native geodatabase is currently open. Used to confirm that the connection held for
+   * the lifetime of the record store actually opened the geodatabase, since {@link #getValue()}
+   * returns null rather than throwing when the path cannot be found.
+   */
+  public synchronized boolean isOpen() {
+    return this.geodatabase != null;
   }
 
   public synchronized boolean isPathExists(String path) {

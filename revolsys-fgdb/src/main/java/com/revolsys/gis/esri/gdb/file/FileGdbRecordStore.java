@@ -109,6 +109,13 @@ public class FileGdbRecordStore extends AbstractRecordStore {
 
   private final GeodatabaseReference geodatabase = new GeodatabaseReference();
 
+  /**
+   * Connection held for the lifetime of the record store, so the native geodatabase is opened once
+   * rather than being opened and closed around each operation. Taken in
+   * {@link #initializeDo()} and released in {@link #closeDo()}.
+   */
+  private BaseCloseable geodatabaseConnection;
+
   private final Map<PathName, AtomicLong> idGenerators = new HashMap<>();
 
   private final Map<String, TableReference> tableByCatalogPath = new HashMap<>();
@@ -297,6 +304,15 @@ public class FileGdbRecordStore extends AbstractRecordStore {
             table.close();
           }
           this.tableByCatalogPath.clear();
+
+          // Release the lifetime connection taken in initializeDo. Tables are
+          // closed first
+          // because each holds its own connection to the same geodatabase.
+          final BaseCloseable connection = this.geodatabaseConnection;
+          this.geodatabaseConnection = null;
+          if (connection != null) {
+            connection.close();
+          }
 
           this.geodatabase.close();
         }
@@ -591,7 +607,6 @@ public class FileGdbRecordStore extends AbstractRecordStore {
   public void initializeDo() {
     boolean exists = false;
     synchronized (this.geodatabase) {
-      Geodatabase geodatabase = null;
       try {
         super.initializeDo();
         final File file = new File(this.fileName);
@@ -601,27 +616,57 @@ public class FileGdbRecordStore extends AbstractRecordStore {
               throw new IllegalArgumentException(
                 FileUtil.getCanonicalPath(file) + " is not a valid ESRI File Geodatabase");
             }
-            geodatabase = EsriFileGdb.openGeodatabase(this.fileName);
           } else {
             throw new IllegalArgumentException(
               FileUtil.getCanonicalPath(file) + " ESRI File Geodatabase must be a directory");
           }
         } else if (isCreateMissingRecordStore()) {
-          geodatabase = EsriFileGdb.createGeodatabase(this.fileName);
+          final Geodatabase createdGeodatabase = EsriFileGdb.createGeodatabase(this.fileName);
+          if (createdGeodatabase == null) {
+            throw new IllegalArgumentException(
+              "Unable to create ESRI file geodatabase " + this.fileName);
+          }
+          // Release the handle returned by createGeodatabase. From here on the
+          // geodatabase is
+          // reached only through the single connection held below.
+          closeGeodatabase(createdGeodatabase);
           final FileGdbRecordStoreSchema rootSchema = getRootSchema();
           rootSchema.setInitialized(true);
         } else {
           throw new IllegalArgumentException("ESRI file geodatabase not found " + this.fileName);
         }
-        if (geodatabase == null) {
+
+        // The file name must be set before anything reaches the geodatabase
+        // through the shared
+        // reference. GeodatabaseReference.getValue() cannot open a geodatabase
+        // without it and
+        // returns null instead of failing, which is why the domain definitions
+        // read below were
+        // previously always null.
+        this.geodatabase.setFileName(this.fileName);
+
+        // Hold one connection for the lifetime of the record store. Without it
+        // the reference
+        // count drops to zero after each operation and the native geodatabase
+        // is closed and
+        // reopened around individual calls. Every reopen re-acquires the .gdb
+        // lock, which is
+        // merely wasteful on local disk but fails intermittently on a network
+        // share with
+        // "Cannot acquire a lock. (-2147220947)".
+        this.geodatabaseConnection = this.geodatabase.connect();
+        if (!this.geodatabase.isOpen()) {
           throw new IllegalArgumentException(
-            "Unable to open ESRI file geodatabase not found " + this.fileName);
+            "Unable to open ESRI file geodatabase " + this.fileName);
         }
-        final VectorOfWString domainNames = geodatabase.getDomains();
-        for (int i = 0; i < domainNames.size(); i++) {
-          final String domainName = domainNames.get(i);
-          final String domainDef = this.geodatabase.getDomainDefinition(domainName);
-          loadDomain(domainName, domainDef);
+
+        final VectorOfWString domainNames = this.geodatabase.getDomains();
+        if (domainNames != null) {
+          for (int i = 0; i < domainNames.size(); i++) {
+            final String domainName = domainNames.get(i);
+            final String domainDef = this.geodatabase.getDomainDefinition(domainName);
+            loadDomain(domainName, domainDef);
+          }
         }
         exists = true;
       } catch (final Throwable e) {
@@ -630,14 +675,9 @@ public class FileGdbRecordStore extends AbstractRecordStore {
         } finally {
           Exceptions.throwUncheckedException(e);
         }
-      } finally {
-        if (geodatabase != null) {
-          closeGeodatabase(geodatabase);
-        }
       }
     }
     this.exists = exists;
-    this.geodatabase.setFileName(this.fileName);
   }
 
   @Override
