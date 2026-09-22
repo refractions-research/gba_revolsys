@@ -292,7 +292,10 @@ public class FileGdbRecordStore extends AbstractRecordStore {
 
   public void closeDo() {
     this.exists = false;
-    synchronized (this.geodatabase) {
+    // The coarse mutex, not the geodatabase monitor: this closes tables and the thread's writer,
+    // both of which take table monitors, and a table monitor is only ever taken outside the
+    // geodatabase monitor.
+    synchronized (this.geodatabase.getApiSync()) {
       try {
         if (!isClosed()) {
           final Writer<Record> writer = getThreadProperty("writer");
@@ -606,7 +609,9 @@ public class FileGdbRecordStore extends AbstractRecordStore {
   @Override
   public void initializeDo() {
     boolean exists = false;
-    synchronized (this.geodatabase) {
+    // Must be the coarse mutex rather than the geodatabase monitor, because the failure path calls
+    // closeDo, which holds the coarse mutex.
+    synchronized (this.geodatabase.getApiSync()) {
       try {
         super.initializeDo();
         final File file = new File(this.fileName);
@@ -718,6 +723,11 @@ public class FileGdbRecordStore extends AbstractRecordStore {
     return null;
   }
 
+  /**
+   * Called from inside {@link TableReference#writeLock(boolean)}, so this must stay on the
+   * geodatabase monitor - the innermost of the three. Moving it to the coarse mutex would acquire an
+   * outer lock while holding a table monitor.
+   */
   void lockTable(final Table table) {
     synchronized (this.geodatabase) {
       table.setWriteLock();
@@ -878,11 +888,9 @@ public class FileGdbRecordStore extends AbstractRecordStore {
     return newRecordWriter(recordDefinition, false);
   }
 
-  // TODO deadlocks!!!!!!!!
-  // EG: I have attempted to resolve the deadlock issue
-  // by moving the synchronized block to exclude the writer. The
-  // writer acquires a table lock to ensure two threads
-  // are not writing to the same table
+  // The synchronized block deliberately excludes the writer: constructing a FileGdbWriter takes a
+  // table write lock, and a table monitor must never be taken while the geodatabase monitor is
+  // held. See the lock order on GeodatabaseReference.
   public FileGdbWriter newRecordWriter(final RecordDefinitionProxy recordDefinition,
     final boolean loadOnlyMode) {
     final GeodatabaseReference geodatabase = this.geodatabase;
@@ -1111,6 +1119,10 @@ public class FileGdbRecordStore extends AbstractRecordStore {
     return this.fileName;
   }
 
+  /**
+   * Called from inside {@link TableReference#writeLock(boolean)}'s unlock path, so like
+   * {@link #lockTable(Table)} this must stay on the geodatabase monitor.
+   */
   void unlockTable(final Table table) {
     synchronized (this.geodatabase) {
       table.freeWriteLock();

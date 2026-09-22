@@ -11,6 +11,19 @@ import com.revolsys.io.BaseCloseable;
 import com.revolsys.record.io.format.esri.gdb.xml.model.Domain;
 import com.revolsys.record.io.format.esri.gdb.xml.model.EsriGdbXmlSerializer;
 
+/**
+ * <h2>Lock order</h2>
+ * Three monitors guard the native geodatabase. They must always be acquired in this order, from
+ * outermost to innermost:
+ * <ol>
+ * <li>{@link #getApiSync()} - the coarse mutex serialising multi-call sequences.</li>
+ * <li>The {@link TableReference} monitor - a table's reference count and lock counts.</li>
+ * <li>This object's own monitor - the geodatabase reference count, and single native calls.</li>
+ * </ol>
+ * Using this object's own monitor for the first role as well as the third is what deadlocked:
+ * opening a table takes the table monitor and then this one (TableReference.valueNew connects to
+ * the geodatabase), while deleting a row took this one and then the table monitor.
+ */
 public class GeodatabaseReference {
 
   private final BaseCloseable closeable = newCloseable();
@@ -20,6 +33,19 @@ public class GeodatabaseReference {
   private Geodatabase geodatabase;
 
   private String fileName;
+
+  /**
+   * Coarse mutex for sequences of native calls that must not interleave with one another: inserting,
+   * updating and deleting rows, and opening or closing the record store. Individual calls on this
+   * object are already serialised by its own monitor; this adds atomicity across several of them.
+   *
+   * <p>
+   * It is deliberately <b>not</b> this object's own monitor. It sits outside the
+   * {@link TableReference} monitor, whereas this object's monitor sits inside it, so the two roles
+   * cannot share a lock without inverting. Never acquire this while holding a table monitor or this
+   * object's monitor.
+   */
+  private final Object apiSync = new Object();
 
   public synchronized void alterDomain(final Domain domain) {
     final String domainDefinition = EsriGdbXmlSerializer.toString(domain);
@@ -147,6 +173,13 @@ public class GeodatabaseReference {
   @Override
   protected void finalize() throws Throwable {
     close();
+  }
+
+  /**
+   * The coarse mutex described on this class. Acquire it before any table monitor.
+   */
+  public Object getApiSync() {
+    return this.apiSync;
   }
 
   public synchronized VectorOfWString getChildDatasets(final String catalogPath,

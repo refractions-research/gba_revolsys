@@ -21,6 +21,13 @@ import com.revolsys.record.schema.RecordDefinition;
 import com.revolsys.util.CloseableValueHolder;
 import com.revolsys.util.SimpleValueWrapper;
 
+/**
+ * This object's monitor sits between {@link GeodatabaseReference#getApiSync()} (outside it) and the
+ * {@link GeodatabaseReference} monitor (inside it) - see the lock order documented on
+ * {@link GeodatabaseReference}. Every synchronized method here may reach the geodatabase monitor,
+ * through {@link #valueNew()}, {@link #valueClose(Table)} or
+ * {@link FileGdbRecordStore#lockTable(Table)}, so none of them may acquire the coarse mutex.
+ */
 class TableReference extends CloseableValueHolder<Table> {
   private class EsriFileGdbTableConnection implements TableWrapper {
 
@@ -124,7 +131,7 @@ class TableReference extends CloseableValueHolder<Table> {
   boolean deleteRecordRow(final Record record) {
     final Integer objectId = record.getInteger("OBJECTID");
     if (objectId != null) {
-      synchronized (this.geodatabase) {
+      synchronized (this.geodatabase.getApiSync()) {
         try (
           BaseCloseable lock = writeLock(false)) {
           final String deleteSql = "DELETE FROM " + this.tableName + " WHERE OBJECTID=" + objectId;
@@ -209,7 +216,7 @@ class TableReference extends CloseableValueHolder<Table> {
                 throw new ObjectPropertyException(record, name, e);
               }
             }
-            synchronized (this.geodatabase) {
+            synchronized (this.geodatabase.getApiSync()) {
               table.insertRow(row);
             }
             if (sourceRecordDefinition == recordDefinition) {
@@ -301,7 +308,7 @@ class TableReference extends CloseableValueHolder<Table> {
     if (objectId != null) {
       validateRequired(record);
       final String whereClause = "OBJECTID=" + objectId;
-      synchronized (this.geodatabase) {
+      synchronized (this.geodatabase.getApiSync()) {
         final Table table = getValue();
         try (
           BaseCloseable lock = writeLock(false)) {
